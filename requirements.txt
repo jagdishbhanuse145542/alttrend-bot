@@ -1,0 +1,6 @@
+python-binance
+ta
+pandas
+mplfinance
+requests
+
