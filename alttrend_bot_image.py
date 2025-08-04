@@ -1,67 +1,115 @@
-import os
 import time
 import requests
-import pandas as pd
 from binance.client import Client
 from ta.trend import EMAIndicator
+import pandas as pd
+import matplotlib.pyplot as plt
+import threading
+import http.server
+import socketserver
+import os
 
-# Telegram Info
+# ✅ Telegram Bot Credentials (Render वर ENV VAR म्हणून द्यायचं)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# Binance Client
+# ✅ Binance client
 client = Client()
 
-# Timeframes
+# ✅ Timeframes आणि Coins
 TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1d']
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT"]
 
-# Get Symbols
-def get_usdt_symbols():
-    exchange_info = client.get_exchange_info()
-    symbols = [s['symbol'] for s in exchange_info['symbols'] if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING']
-    return symbols[:20]
-
-# Get Data
-def get_klines(symbol, interval, limit=100):
-    data = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-    df = pd.DataFrame(data, columns=["Time", "Open", "High", "Low", "Close", "Volume", "CloseTime", "QuoteAssetVolume", "Trades", "TakerBuyBase", "TakerBuyQuote", "Ignore"])
-    df = df[["Time", "Open", "High", "Low", "Close", "Volume"]].astype(float)
-    return df
-
-# Check EMA Compression
-def check_ema_compression(df):
-    df['EMA20'] = EMAIndicator(close=df['Close'], window=20).ema_indicator()
-    df['EMA50'] = EMAIndicator(close=df['Close'], window=50).ema_indicator()
-    df['EMA100'] = EMAIndicator(close=df['Close'], window=100).ema_indicator()
-    df['EMA200'] = EMAIndicator(close=df['Close'], window=200).ema_indicator()
-    latest = df.iloc[-1]
-    ema_vals = [latest['EMA20'], latest['EMA50'], latest['EMA100'], latest['EMA200']]
-    return max(ema_vals) - min(ema_vals) < 0.2
-
-# Send Signal
-def send_signal(symbol, tf):
-    message = f"📊 Signal: {symbol} ({tf})\nEMA Compression Detected"
+# ✅ Send text message
+def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message}
+    data = {"chat_id": CHAT_ID, "text": message}
+    requests.post(url, data=data)
+
+# ✅ Send chart image
+def send_chart(file_path):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    with open(file_path, 'rb') as f:
+        files = {"photo": f}
+        data = {"chat_id": CHAT_ID}
+        requests.post(url, data=data, files=files)
+
+# ✅ Get historical candles
+def get_klines(symbol, interval):
     try:
-        requests.post(url, data=payload)
+        data = client.get_klines(symbol=symbol, interval=interval, limit=100)
+        df = pd.DataFrame(data, columns=[
+            "Time", "Open", "High", "Low", "Close", "Volume",
+            "Close_time", "Quote_asset_volume", "Number_of_trades",
+            "Taker_buy_base", "Taker_buy_quote", "Ignore"
+        ])
+        df["Open"] = df["Open"].astype(float)
+        df["High"] = df["High"].astype(float)
+        df["Low"] = df["Low"].astype(float)
+        df["Close"] = df["Close"].astype(float)
+        return df
     except Exception as e:
-        print("Error sending message:", e)
+        print(f"Error: {symbol} {interval} - {e}")
+        return None
 
-# Main Loop
-def run_bot():
-    print("🚀 AltTrendBot चालू आहे... Real-time सिग्नल शोधतोय.")
-    while True:
-        for symbol in get_usdt_symbols():
-            for tf in TIMEFRAMES:
-                try:
-                    print(f"⏳ Checking {symbol} - {tf}")
-                    df = get_klines(symbol, tf)
-                    if check_ema_compression(df):
-                        send_signal(symbol, tf)
-                except Exception as e:
-                    print(f"Error: {symbol} {tf} -", e)
-        time.sleep(60)
+# ✅ Plot chart and save image
+def plot_chart(df, symbol, tf):
+    plt.figure(figsize=(10, 4))
+    plt.plot(df['Close'], label='Close Price')
+    plt.plot(df['ema20'], label='EMA 20')
+    plt.plot(df['ema50'], label='EMA 50')
+    plt.plot(df['ema100'], label='EMA 100')
+    plt.plot(df['ema200'], label='EMA 200')
+    plt.title(f"{symbol} - {tf} Chart")
+    plt.legend()
+    chart_file = f"chart_{symbol}_{tf}.png"
+    plt.savefig(chart_file)
+    plt.close()
+    return chart_file
 
-if __name__ == "__main__":
-    run_bot()
+# ✅ Main scanning function
+def scan():
+    for symbol in SYMBOLS:
+        for tf in TIMEFRAMES:
+            print(f"⏳ Checking {symbol} - {tf}")
+            df = get_klines(symbol, tf)
+            if df is None:
+                continue
+            try:
+                df['ema20'] = EMAIndicator(df['Close'], window=20).ema_indicator()
+                df['ema50'] = EMAIndicator(df['Close'], window=50).ema_indicator()
+                df['ema100'] = EMAIndicator(df['Close'], window=100).ema_indicator()
+                df['ema200'] = EMAIndicator(df['Close'], window=200).ema_indicator()
+
+                last = df.iloc[-1]
+                d = abs(last['ema20'] - last['ema50']) + abs(last['ema50'] - last['ema100']) + abs(last['ema100'] - last['ema200'])
+
+                threshold = 0.5  # तू हे कमी-जास्त करू शकतो
+                if d < threshold:
+                    message = f"📊 Signal: {symbol} ({tf})\nEMA Compression Detected ✅"
+                    print(message)
+                    send_telegram(message)
+                    chart_path = plot_chart(df, symbol, tf)
+                    send_chart(chart_path)
+
+            except Exception as e:
+                print(f"Error in EMA for {symbol}-{tf}: {e}")
+
+# ✅ Render साठी dummy HTTP server चालू ठेव
+def keep_alive():
+    PORT = 8080
+    handler = http.server.SimpleHTTPRequestHandler
+    with socketserver.TCPServer(("", PORT), handler) as httpd:
+        httpd.serve_forever()
+
+# 🔁 Start dummy server in background
+t = threading.Thread(target=keep_alive)
+t.daemon = True
+t.start()
+
+# ✅ Start bot loop
+print("🚀 AltTrendBot चालू आहे... Real-time सिग्नल शोधतोय.")
+while True:
+    scan()
+    time.sleep(120)  # 2 मिनिटांनी पुन्हा स्कॅन करेल
+
